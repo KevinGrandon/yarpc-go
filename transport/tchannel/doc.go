@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -50,8 +50,8 @@
 // 	myserviceOutbound := tchannelTransport.NewOutbound()
 // 	dispatcher := yarpc.NewDispatcher(yarpc.Config{
 // 		Name: "myservice",
-// 		Outbounds: yarpc.OUtbounds{
-// 			{Unary: myserviceOutbound},
+// 		Outbounds: yarpc.Outbounds{
+// 			"outboundservice": {Unary: myserviceOutbound},
 // 		},
 // 	})
 //

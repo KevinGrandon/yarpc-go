@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -38,8 +38,8 @@ var (
 	_noContextDeadlineError = yarpcerrors.Newf(yarpcerrors.CodeInvalidArgument, "can't wait for peer without a context deadline for a fewest-pending-requests peer list")
 )
 
-func newNotRunningError(err error) error {
-	return yarpcerrors.FailedPreconditionErrorf("fewest-pending-requests peer list is not running: %s", err.Error())
+func newNotRunningError(err string) error {
+	return yarpcerrors.FailedPreconditionErrorf("fewest-pending-requests peer list is not running: %s", err)
 }
 
 func newUnavailableError(err error) error {
@@ -125,7 +125,7 @@ func TestPeerHeapList(t *testing.T) {
 				UpdateAction{AddedPeerIDs: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}},
 				StopAction{},
 				ChooseAction{
-					ExpectedErr:         newNotRunningError(context.DeadlineExceeded),
+					ExpectedErr:         newNotRunningError("could not wait for instance to start running: current state is \"stopped\""),
 					InputContextTimeout: 10 * time.Millisecond,
 				},
 			},
@@ -269,11 +269,11 @@ func TestPeerHeapList(t *testing.T) {
 			msg: "choose before start",
 			peerListActions: []PeerListAction{
 				ChooseAction{
-					ExpectedErr:         newNotRunningError(context.DeadlineExceeded),
+					ExpectedErr:         newNotRunningError("context finished while waiting for instance to start: context deadline exceeded"),
 					InputContextTimeout: 10 * time.Millisecond,
 				},
 				ChooseAction{
-					ExpectedErr:         newNotRunningError(context.DeadlineExceeded),
+					ExpectedErr:         newNotRunningError("context finished while waiting for instance to start: context deadline exceeded"),
 					InputContextTimeout: 10 * time.Millisecond,
 				},
 			},
@@ -585,7 +585,8 @@ func TestPeerHeapList(t *testing.T) {
 			ExpectPeerRetainsWithError(transport, tt.errRetainedPeerIDs, tt.retainErr)
 			ExpectPeerReleases(transport, tt.errReleasedPeerIDs, tt.releaseErr)
 
-			pl := New(transport, Capacity(0))
+			opts := []ListOption{Capacity(0), noShuffle}
+			pl := New(transport, opts...)
 
 			deps := ListActionDeps{
 				Peers: peerMap,
@@ -610,4 +611,8 @@ func TestPeerHeapList(t *testing.T) {
 			assert.Equal(t, tt.expectedRunning, pl.IsRunning(), "Peer list should match expected final running state")
 		})
 	}
+}
+
+var noShuffle ListOption = func(c *listConfig) {
+	c.shuffle = false
 }

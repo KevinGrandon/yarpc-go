@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -105,8 +105,11 @@ func (o *ChannelOutbound) IsRunning() bool {
 
 // Call sends an RPC over this TChannel outbound.
 func (o *ChannelOutbound) Call(ctx context.Context, req *transport.Request) (*transport.Response, error) {
+	if req == nil {
+		return nil, yarpcerrors.InvalidArgumentErrorf("request for tchannel channel outbound was nil")
+	}
 	if err := o.once.WaitUntilRunning(ctx); err != nil {
-		return nil, err
+		return nil, intyarpcerrors.AnnotateWithInfo(yarpcerrors.FromError(err), "error waiting for tchannel channel outbound to start for service: %s", req.Service)
 	}
 	if _, ok := ctx.(tchannel.ContextWithHeaders); ok {
 		return nil, errDoNotUseContextWithHeaders
@@ -150,20 +153,23 @@ func (o *ChannelOutbound) Call(ctx context.Context, req *transport.Request) (*tr
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, toYARPCError(req, err)
 	}
 
-	// Inject tracing system baggage
-	reqHeaders := tchannel.InjectOutboundSpan(call.Response(), req.Headers.Items())
-
-	if err := writeRequestHeaders(ctx, format, reqHeaders, call.Arg2Writer); err != nil {
+	reqHeaders := req.Headers.Items()
+	if o.transport.originalHeaders {
+		reqHeaders = req.Headers.OriginalItems()
+	}
+	// baggage headers are transport implementation details that are stripped out (and stored in the context). Users don't interact with it
+	tracingBaggage := tchannel.InjectOutboundSpan(call.Response(), nil)
+	if err := writeHeaders(format, reqHeaders, tracingBaggage, call.Arg2Writer); err != nil {
 		// TODO(abg): This will wrap IO errors while writing headers as encode
 		// errors. We should fix that.
 		return nil, errors.RequestHeadersEncodeError(req, err)
 	}
 
 	if err := writeBody(req.Body, call); err != nil {
-		return nil, err
+		return nil, toYARPCError(req, err)
 	}
 
 	res := call.Response()
@@ -182,7 +188,7 @@ func (o *ChannelOutbound) Call(ctx context.Context, req *transport.Request) (*tr
 		if err, ok := err.(tchannel.SystemError); ok {
 			return nil, fromSystemError(err)
 		}
-		return nil, err
+		return nil, toYARPCError(req, err)
 	}
 
 	return &transport.Response{

@@ -2,7 +2,7 @@
 // source: internal/crossdock/crossdockpb/crossdock.proto
 // DO NOT EDIT!
 
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -26,14 +26,18 @@ package crossdockpb
 
 import (
 	"context"
+	"io/ioutil"
 	"reflect"
 
 	"github.com/gogo/protobuf/proto"
+	"go.uber.org/fx"
 	"go.uber.org/yarpc"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/encoding/protobuf"
 	"go.uber.org/yarpc/yarpcproto"
 )
+
+var _ = ioutil.NopCloser
 
 // EchoYARPCClient is the YARPC client-side interface for the Echo service.
 type EchoYARPCClient interface {
@@ -42,7 +46,7 @@ type EchoYARPCClient interface {
 
 // NewEchoYARPCClient builds a new YARPC client for the Echo service.
 func NewEchoYARPCClient(clientConfig transport.ClientConfig, options ...protobuf.ClientOption) EchoYARPCClient {
-	return &_EchoYARPCCaller{protobuf.NewClient(
+	return &_EchoYARPCCaller{protobuf.NewStreamClient(
 		protobuf.ClientParams{
 			ServiceName:  "uber.yarpc.internal.crossdock.Echo",
 			ClientConfig: clientConfig,
@@ -68,28 +72,104 @@ func BuildEchoYARPCProcedures(server EchoYARPCServer) []transport.Procedure {
 					Handler: protobuf.NewUnaryHandler(
 						protobuf.UnaryHandlerParams{
 							Handle:     handler.Echo,
-							NewRequest: newEcho_EchoYARPCRequest,
+							NewRequest: newEchoServiceEchoYARPCRequest,
 						},
 					),
 				},
 			},
 			OnewayHandlerParams: []protobuf.BuildProceduresOnewayHandlerParams{},
+			StreamHandlerParams: []protobuf.BuildProceduresStreamHandlerParams{},
 		},
 	)
 }
 
+// FxEchoYARPCClientParams defines the input
+// for NewFxEchoYARPCClient. It provides the
+// paramaters to get a EchoYARPCClient in an
+// Fx application.
+type FxEchoYARPCClientParams struct {
+	fx.In
+
+	Provider yarpc.ClientConfig
+}
+
+// FxEchoYARPCClientResult defines the output
+// of NewFxEchoYARPCClient. It provides a
+// EchoYARPCClient to an Fx application.
+type FxEchoYARPCClientResult struct {
+	fx.Out
+
+	Client EchoYARPCClient
+
+	// We are using an fx.Out struct here instead of just returning a client
+	// so that we can add more values or add named versions of the client in
+	// the future without breaking any existing code.
+}
+
+// NewFxEchoYARPCClient provides a EchoYARPCClient
+// to an Fx application using the given name for routing.
+//
+//  fx.Provide(
+//    crossdockpb.NewFxEchoYARPCClient("service-name"),
+//    ...
+//  )
+func NewFxEchoYARPCClient(name string, options ...protobuf.ClientOption) interface{} {
+	return func(params FxEchoYARPCClientParams) FxEchoYARPCClientResult {
+		return FxEchoYARPCClientResult{
+			Client: NewEchoYARPCClient(params.Provider.ClientConfig(name), options...),
+		}
+	}
+}
+
+// FxEchoYARPCProceduresParams defines the input
+// for NewFxEchoYARPCProcedures. It provides the
+// paramaters to get EchoYARPCServer procedures in an
+// Fx application.
+type FxEchoYARPCProceduresParams struct {
+	fx.In
+
+	Server EchoYARPCServer
+}
+
+// FxEchoYARPCProceduresResult defines the output
+// of NewFxEchoYARPCProcedures. It provides
+// EchoYARPCServer procedures to an Fx application.
+//
+// The procedures are provided to the "yarpcfx" value group.
+// Dig 1.2 or newer must be used for this feature to work.
+type FxEchoYARPCProceduresResult struct {
+	fx.Out
+
+	Procedures []transport.Procedure `group:"yarpcfx"`
+}
+
+// NewFxEchoYARPCProcedures provides EchoYARPCServer procedures to an Fx application.
+// It expects a EchoYARPCServer to be present in the container.
+//
+//  fx.Provide(
+//    crossdockpb.NewFxEchoYARPCProcedures(),
+//    ...
+//  )
+func NewFxEchoYARPCProcedures() interface{} {
+	return func(params FxEchoYARPCProceduresParams) FxEchoYARPCProceduresResult {
+		return FxEchoYARPCProceduresResult{
+			Procedures: BuildEchoYARPCProcedures(params.Server),
+		}
+	}
+}
+
 type _EchoYARPCCaller struct {
-	client protobuf.Client
+	streamClient protobuf.StreamClient
 }
 
 func (c *_EchoYARPCCaller) Echo(ctx context.Context, request *Ping, options ...yarpc.CallOption) (*Pong, error) {
-	responseMessage, err := c.client.Call(ctx, "Echo", request, newEcho_EchoYARPCResponse, options...)
+	responseMessage, err := c.streamClient.Call(ctx, "Echo", request, newEchoServiceEchoYARPCResponse, options...)
 	if responseMessage == nil {
 		return nil, err
 	}
 	response, ok := responseMessage.(*Pong)
 	if !ok {
-		return nil, protobuf.CastError(emptyEcho_EchoYARPCResponse, responseMessage)
+		return nil, protobuf.CastError(emptyEchoServiceEchoYARPCResponse, responseMessage)
 	}
 	return response, err
 }
@@ -104,7 +184,7 @@ func (h *_EchoYARPCHandler) Echo(ctx context.Context, requestMessage proto.Messa
 	if requestMessage != nil {
 		request, ok = requestMessage.(*Ping)
 		if !ok {
-			return nil, protobuf.CastError(emptyEcho_EchoYARPCRequest, requestMessage)
+			return nil, protobuf.CastError(emptyEchoServiceEchoYARPCRequest, requestMessage)
 		}
 	}
 	response, err := h.server.Echo(ctx, request)
@@ -114,17 +194,17 @@ func (h *_EchoYARPCHandler) Echo(ctx context.Context, requestMessage proto.Messa
 	return response, err
 }
 
-func newEcho_EchoYARPCRequest() proto.Message {
+func newEchoServiceEchoYARPCRequest() proto.Message {
 	return &Ping{}
 }
 
-func newEcho_EchoYARPCResponse() proto.Message {
+func newEchoServiceEchoYARPCResponse() proto.Message {
 	return &Pong{}
 }
 
 var (
-	emptyEcho_EchoYARPCRequest  = &Ping{}
-	emptyEcho_EchoYARPCResponse = &Pong{}
+	emptyEchoServiceEchoYARPCRequest  = &Ping{}
+	emptyEchoServiceEchoYARPCResponse = &Pong{}
 )
 
 // OnewayYARPCClient is the YARPC client-side interface for the Oneway service.
@@ -134,7 +214,7 @@ type OnewayYARPCClient interface {
 
 // NewOnewayYARPCClient builds a new YARPC client for the Oneway service.
 func NewOnewayYARPCClient(clientConfig transport.ClientConfig, options ...protobuf.ClientOption) OnewayYARPCClient {
-	return &_OnewayYARPCCaller{protobuf.NewClient(
+	return &_OnewayYARPCCaller{protobuf.NewStreamClient(
 		protobuf.ClientParams{
 			ServiceName:  "uber.yarpc.internal.crossdock.Oneway",
 			ClientConfig: clientConfig,
@@ -161,21 +241,97 @@ func BuildOnewayYARPCProcedures(server OnewayYARPCServer) []transport.Procedure 
 					Handler: protobuf.NewOnewayHandler(
 						protobuf.OnewayHandlerParams{
 							Handle:     handler.Echo,
-							NewRequest: newOneway_EchoYARPCRequest,
+							NewRequest: newOnewayServiceEchoYARPCRequest,
 						},
 					),
 				},
 			},
+			StreamHandlerParams: []protobuf.BuildProceduresStreamHandlerParams{},
 		},
 	)
 }
 
+// FxOnewayYARPCClientParams defines the input
+// for NewFxOnewayYARPCClient. It provides the
+// paramaters to get a OnewayYARPCClient in an
+// Fx application.
+type FxOnewayYARPCClientParams struct {
+	fx.In
+
+	Provider yarpc.ClientConfig
+}
+
+// FxOnewayYARPCClientResult defines the output
+// of NewFxOnewayYARPCClient. It provides a
+// OnewayYARPCClient to an Fx application.
+type FxOnewayYARPCClientResult struct {
+	fx.Out
+
+	Client OnewayYARPCClient
+
+	// We are using an fx.Out struct here instead of just returning a client
+	// so that we can add more values or add named versions of the client in
+	// the future without breaking any existing code.
+}
+
+// NewFxOnewayYARPCClient provides a OnewayYARPCClient
+// to an Fx application using the given name for routing.
+//
+//  fx.Provide(
+//    crossdockpb.NewFxOnewayYARPCClient("service-name"),
+//    ...
+//  )
+func NewFxOnewayYARPCClient(name string, options ...protobuf.ClientOption) interface{} {
+	return func(params FxOnewayYARPCClientParams) FxOnewayYARPCClientResult {
+		return FxOnewayYARPCClientResult{
+			Client: NewOnewayYARPCClient(params.Provider.ClientConfig(name), options...),
+		}
+	}
+}
+
+// FxOnewayYARPCProceduresParams defines the input
+// for NewFxOnewayYARPCProcedures. It provides the
+// paramaters to get OnewayYARPCServer procedures in an
+// Fx application.
+type FxOnewayYARPCProceduresParams struct {
+	fx.In
+
+	Server OnewayYARPCServer
+}
+
+// FxOnewayYARPCProceduresResult defines the output
+// of NewFxOnewayYARPCProcedures. It provides
+// OnewayYARPCServer procedures to an Fx application.
+//
+// The procedures are provided to the "yarpcfx" value group.
+// Dig 1.2 or newer must be used for this feature to work.
+type FxOnewayYARPCProceduresResult struct {
+	fx.Out
+
+	Procedures []transport.Procedure `group:"yarpcfx"`
+}
+
+// NewFxOnewayYARPCProcedures provides OnewayYARPCServer procedures to an Fx application.
+// It expects a OnewayYARPCServer to be present in the container.
+//
+//  fx.Provide(
+//    crossdockpb.NewFxOnewayYARPCProcedures(),
+//    ...
+//  )
+func NewFxOnewayYARPCProcedures() interface{} {
+	return func(params FxOnewayYARPCProceduresParams) FxOnewayYARPCProceduresResult {
+		return FxOnewayYARPCProceduresResult{
+			Procedures: BuildOnewayYARPCProcedures(params.Server),
+		}
+	}
+}
+
 type _OnewayYARPCCaller struct {
-	client protobuf.Client
+	streamClient protobuf.StreamClient
 }
 
 func (c *_OnewayYARPCCaller) Echo(ctx context.Context, request *Token, options ...yarpc.CallOption) (yarpc.Ack, error) {
-	return c.client.CallOneway(ctx, "Echo", request, options...)
+	return c.streamClient.CallOneway(ctx, "Echo", request, options...)
 }
 
 type _OnewayYARPCHandler struct {
@@ -188,23 +344,23 @@ func (h *_OnewayYARPCHandler) Echo(ctx context.Context, requestMessage proto.Mes
 	if requestMessage != nil {
 		request, ok = requestMessage.(*Token)
 		if !ok {
-			return protobuf.CastError(emptyOneway_EchoYARPCRequest, requestMessage)
+			return protobuf.CastError(emptyOnewayServiceEchoYARPCRequest, requestMessage)
 		}
 	}
 	return h.server.Echo(ctx, request)
 }
 
-func newOneway_EchoYARPCRequest() proto.Message {
+func newOnewayServiceEchoYARPCRequest() proto.Message {
 	return &Token{}
 }
 
-func newOneway_EchoYARPCResponse() proto.Message {
+func newOnewayServiceEchoYARPCResponse() proto.Message {
 	return &yarpcproto.Oneway{}
 }
 
 var (
-	emptyOneway_EchoYARPCRequest  = &Token{}
-	emptyOneway_EchoYARPCResponse = &yarpcproto.Oneway{}
+	emptyOnewayServiceEchoYARPCRequest  = &Token{}
+	emptyOnewayServiceEchoYARPCResponse = &yarpcproto.Oneway{}
 )
 
 func init() {

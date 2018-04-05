@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -82,11 +82,12 @@ func (options transportOptions) newChannelTransport() *ChannelTransport {
 		logger = zap.NewNop()
 	}
 	return &ChannelTransport{
-		once:   lifecycle.NewOnce(),
-		ch:     options.ch,
-		addr:   options.addr,
-		tracer: options.tracer,
-		logger: logger,
+		once:            lifecycle.NewOnce(),
+		ch:              options.ch,
+		addr:            options.addr,
+		tracer:          options.tracer,
+		logger:          logger,
+		originalHeaders: options.originalHeaders,
 	}
 }
 
@@ -95,12 +96,13 @@ func (options transportOptions) newChannelTransport() *ChannelTransport {
 // If you have a YARPC peer.Chooser, use the unqualified tchannel.Transport
 // instead.
 type ChannelTransport struct {
-	ch     Channel
-	name   string
-	addr   string
-	tracer opentracing.Tracer
-	logger *zap.Logger
-	router transport.Router
+	ch              Channel
+	name            string
+	addr            string
+	tracer          opentracing.Tracer
+	logger          *zap.Logger
+	router          transport.Router
+	originalHeaders bool
 
 	once *lifecycle.Once
 }

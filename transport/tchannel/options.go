@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,7 @@
 package tchannel
 
 import (
+	"net"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -51,9 +52,11 @@ type transportOptions struct {
 	tracer              opentracing.Tracer
 	logger              *zap.Logger
 	addr                string
+	listener            net.Listener
 	name                string
 	connTimeout         time.Duration
 	connBackoffStrategy backoffapi.Strategy
+	originalHeaders     bool
 }
 
 // newTransportOptions constructs the default transport options struct
@@ -119,6 +122,16 @@ func ListenAddr(addr string) TransportOption {
 	}
 }
 
+// Listener sets a net.Listener to use for the channel. This only applies to
+// NewTransport (will not work with NewChannelTransport).
+//
+// The default is to depend on the ListenAddr (no-op).
+func Listener(l net.Listener) TransportOption {
+	return func(t *transportOptions) {
+		t.listener = l
+	}
+}
+
 // ServiceName informs the NewChannelTransport constructor which service
 // name to use if it needs to construct a root Channel object, as when called
 // without the WithChannel option.
@@ -161,5 +174,12 @@ func ConnTimeout(d time.Duration) TransportOption {
 func ConnBackoff(s backoffapi.Strategy) TransportOption {
 	return func(options *transportOptions) {
 		options.connBackoffStrategy = s
+	}
+}
+
+// OriginalHeaders specifies whether to forward headers without canonicalizing them
+func OriginalHeaders() TransportOption {
+	return func(options *transportOptions) {
+		options.originalHeaders = true
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -185,6 +185,9 @@ var (
 // the most specific error code that applies. For example, prefer
 // `OutOfRange` over `FailedPrecondition` if both codes apply.
 // Similarly prefer `NotFound` or `AlreadyExists` over `FailedPrecondition`.
+//
+// These codes are meant to match gRPC status codes.
+// https://godoc.org/google.golang.org/grpc/codes#Code
 type Code int
 
 // String returns the the string representation of the Code.

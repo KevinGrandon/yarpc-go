@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,18 +23,17 @@ package yarpc
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"go.uber.org/multierr"
+	"go.uber.org/net/metrics"
 	"go.uber.org/yarpc/api/middleware"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/internal"
-	"go.uber.org/yarpc/internal/errorsync"
 	"go.uber.org/yarpc/internal/inboundmiddleware"
 	"go.uber.org/yarpc/internal/observability"
 	"go.uber.org/yarpc/internal/outboundmiddleware"
-	"go.uber.org/yarpc/internal/pally"
 	"go.uber.org/yarpc/internal/request"
+	"go.uber.org/yarpc/pkg/lifecycle"
 	"go.uber.org/zap"
 )
 
@@ -50,12 +49,14 @@ type Outbounds map[string]transport.Outbounds
 type OutboundMiddleware struct {
 	Unary  middleware.UnaryOutbound
 	Oneway middleware.OnewayOutbound
+	Stream middleware.StreamOutbound
 }
 
 // InboundMiddleware contains the different types of inbound middlewares.
 type InboundMiddleware struct {
 	Unary  middleware.UnaryInbound
 	Oneway middleware.OnewayInbound
+	Stream middleware.StreamInbound
 }
 
 // RouterMiddleware wraps the Router middleware
@@ -77,8 +78,8 @@ func NewDispatcher(cfg Config) *Dispatcher {
 	logger := cfg.Logging.logger(cfg.Name)
 	extractor := cfg.Logging.extractor()
 
-	registry, stopPush := cfg.Metrics.registry(cfg.Name, logger)
-	cfg = addObservingMiddleware(cfg, registry, logger, extractor)
+	meter, stopMeter := cfg.Metrics.scope(cfg.Name, logger)
+	cfg = addObservingMiddleware(cfg, meter, logger, extractor)
 
 	return &Dispatcher{
 		name:              cfg.Name,
@@ -88,35 +89,43 @@ func NewDispatcher(cfg Config) *Dispatcher {
 		transports:        collectTransports(cfg.Inbounds, cfg.Outbounds),
 		inboundMiddleware: cfg.InboundMiddleware,
 		log:               logger,
-		registry:          registry,
-		stopRegistryPush:  stopPush,
+		meter:             meter,
+		stopMeter:         stopMeter,
+		once:              lifecycle.NewOnce(),
 	}
 }
 
-func addObservingMiddleware(cfg Config, registry *pally.Registry, logger *zap.Logger, extractor observability.ContextExtractor) Config {
-	observer := observability.NewMiddleware(logger, registry, extractor)
+func addObservingMiddleware(cfg Config, meter *metrics.Scope, logger *zap.Logger, extractor observability.ContextExtractor) Config {
+	if cfg.DisableAutoObservabilityMiddleware {
+		return cfg
+	}
+
+	observer := observability.NewMiddleware(logger, meter, extractor)
 
 	cfg.InboundMiddleware.Unary = inboundmiddleware.UnaryChain(observer, cfg.InboundMiddleware.Unary)
 	cfg.InboundMiddleware.Oneway = inboundmiddleware.OnewayChain(observer, cfg.InboundMiddleware.Oneway)
+	cfg.InboundMiddleware.Stream = inboundmiddleware.StreamChain(observer, cfg.InboundMiddleware.Stream)
 
 	cfg.OutboundMiddleware.Unary = outboundmiddleware.UnaryChain(cfg.OutboundMiddleware.Unary, observer)
 	cfg.OutboundMiddleware.Oneway = outboundmiddleware.OnewayChain(cfg.OutboundMiddleware.Oneway, observer)
+	cfg.OutboundMiddleware.Stream = outboundmiddleware.StreamChain(cfg.OutboundMiddleware.Stream, observer)
 
 	return cfg
 }
 
-// convertOutbounds applys outbound middleware and creates validator outbounds
+// convertOutbounds applies outbound middleware and creates validator outbounds
 func convertOutbounds(outbounds Outbounds, mw OutboundMiddleware) Outbounds {
 	outboundSpecs := make(Outbounds, len(outbounds))
 
 	for outboundKey, outs := range outbounds {
-		if outs.Unary == nil && outs.Oneway == nil {
+		if outs.Unary == nil && outs.Oneway == nil && outs.Stream == nil {
 			panic(fmt.Sprintf("no outbound set for outbound key %q in dispatcher", outboundKey))
 		}
 
 		var (
 			unaryOutbound  transport.UnaryOutbound
 			onewayOutbound transport.OnewayOutbound
+			streamOutbound transport.StreamOutbound
 		)
 		serviceName := outboundKey
 
@@ -131,6 +140,11 @@ func convertOutbounds(outbounds Outbounds, mw OutboundMiddleware) Outbounds {
 			onewayOutbound = request.OnewayValidatorOutbound{OnewayOutbound: onewayOutbound}
 		}
 
+		if outs.Stream != nil {
+			streamOutbound = middleware.ApplyStreamOutbound(outs.Stream, mw.Stream)
+			streamOutbound = request.StreamValidatorOutbound{StreamOutbound: streamOutbound}
+		}
+
 		if outs.ServiceName != "" {
 			serviceName = outs.ServiceName
 		}
@@ -139,6 +153,7 @@ func convertOutbounds(outbounds Outbounds, mw OutboundMiddleware) Outbounds {
 			ServiceName: serviceName,
 			Unary:       unaryOutbound,
 			Oneway:      onewayOutbound,
+			Stream:      streamOutbound,
 		}
 	}
 
@@ -168,6 +183,11 @@ func collectTransports(inbounds Inbounds, outbounds Outbounds) []transport.Trans
 				transports[transport] = struct{}{}
 			}
 		}
+		if stream := outbound.Stream; stream != nil {
+			for _, transport := range stream.Transports() {
+				transports[transport] = struct{}{}
+			}
+		}
 	}
 	keys := make([]transport.Transport, 0, len(transports))
 	for key := range transports {
@@ -187,9 +207,11 @@ type Dispatcher struct {
 
 	inboundMiddleware InboundMiddleware
 
-	log              *zap.Logger
-	registry         *pally.Registry
-	stopRegistryPush context.CancelFunc
+	log       *zap.Logger
+	meter     *metrics.Scope
+	stopMeter context.CancelFunc
+
+	once *lifecycle.Once
 }
 
 // Inbounds returns a copy of the list of inbounds for this RPC object.
@@ -269,6 +291,10 @@ func (d *Dispatcher) Register(rs []transport.Procedure) {
 			h := middleware.ApplyOnewayInbound(r.HandlerSpec.Oneway(),
 				d.inboundMiddleware.Oneway)
 			r.HandlerSpec = transport.NewOnewayHandlerSpec(h)
+		case transport.Streaming:
+			h := middleware.ApplyStreamInbound(r.HandlerSpec.Stream(),
+				d.inboundMiddleware.Stream)
+			r.HandlerSpec = transport.NewStreamHandlerSpec(h)
 		default:
 			panic(fmt.Sprintf("unknown handler type %q for service %q, procedure %q",
 				r.HandlerSpec.Type(), r.Service, r.Name))
@@ -281,10 +307,9 @@ func (d *Dispatcher) Register(rs []transport.Procedure) {
 	d.table.Register(procedures)
 }
 
-// Start starts the Dispatcher, allowing it to accept and processing new
-// incoming requests.
-//
-// This starts all inbounds and outbounds configured on this Dispatcher.
+// Start starts the Dispatcher, allowing it to accept and process new incoming
+// requests. This starts all inbounds and outbounds configured on this
+// Dispatcher.
 //
 // This function returns immediately after everything has been started.
 // Servers should add a `select {}` to block to process all incoming requests.
@@ -295,164 +320,92 @@ func (d *Dispatcher) Register(rs []transport.Procedure) {
 // 	defer dispatcher.Stop()
 //
 // 	select {}
+//
+// Start and PhasedStart are mutually exclusive. See the PhasedStart
+// documentation for details.
 func (d *Dispatcher) Start() error {
-	// NOTE: These MUST be started in the order transports, outbounds, and
-	// then inbounds.
-	//
-	// If the outbounds are started before the transports, we might get a
-	// network request before the transports are ready.
-	//
-	// If the inbounds are started before the outbounds, an inbound request
-	// might result in an outbound call before the outbound is ready.
-
-	var (
-		mu         sync.Mutex
-		allStarted []transport.Lifecycle
-	)
-
-	d.log.Info("Starting up.")
-	start := func(s transport.Lifecycle) func() error {
-		return func() error {
-			if s == nil {
-				return nil
-			}
-
-			if err := s.Start(); err != nil {
-				return err
-			}
-
-			mu.Lock()
-			allStarted = append(allStarted, s)
-			mu.Unlock()
-			return nil
+	starter := &PhasedStarter{
+		dispatcher: d,
+		log:        d.log,
+	}
+	return d.once.Start(func() error {
+		d.log.Info("starting dispatcher")
+		starter.setRouters()
+		if err := starter.StartTransports(); err != nil {
+			return err
 		}
-	}
-
-	abort := func(errs []error) error {
-		// Failed to start so stop everything that was started.
-		wait := errorsync.ErrorWaiter{}
-		for _, s := range allStarted {
-			wait.Submit(s.Stop)
+		if err := starter.StartOutbounds(); err != nil {
+			return err
 		}
-		if newErrors := wait.Wait(); len(newErrors) > 0 {
-			errs = append(errs, newErrors...)
+		if err := starter.StartInbounds(); err != nil {
+			return err
 		}
-
-		return multierr.Combine(errs...)
-	}
-
-	// Set router for all inbounds
-	for _, i := range d.inbounds {
-		i.SetRouter(d.table)
-	}
-	d.log.Debug("Set router for inbounds.")
-
-	// Start Transports
-	wait := errorsync.ErrorWaiter{}
-	d.log.Debug("Starting transports.")
-	for _, t := range d.transports {
-		wait.Submit(start(t))
-	}
-	if errs := wait.Wait(); len(errs) != 0 {
-		return abort(errs)
-	}
-	d.log.Debug("Started transports.")
-
-	// Start Outbounds
-	wait = errorsync.ErrorWaiter{}
-	d.log.Debug("Starting outbounds.")
-	for _, o := range d.outbounds {
-		wait.Submit(start(o.Unary))
-		wait.Submit(start(o.Oneway))
-	}
-	if errs := wait.Wait(); len(errs) != 0 {
-		return abort(errs)
-	}
-	d.log.Debug("Started outbounds.")
-
-	// Start Inbounds
-	wait = errorsync.ErrorWaiter{}
-	d.log.Debug("Starting inbounds.")
-	for _, i := range d.inbounds {
-		wait.Submit(start(i))
-	}
-	if errs := wait.Wait(); len(errs) != 0 {
-		return abort(errs)
-	}
-	d.log.Debug("Started inbounds.")
-
-	d.log.Info("Started up.")
-	return nil
+		d.log.Info("dispatcher startup complete")
+		return nil
+	})
 }
 
-// Stop stops the Dispatcher.
+// PhasedStart is a more granular alternative to Start, and is intended only
+// for advanced users. Rather than starting all transports, inbounds, and
+// outbounds at once, it lets the user start them separately.
 //
-// This stops all outbounds and inbounds owned by this Dispatcher.
+// Start and PhasedStart are mutually exclusive. If Start is called first,
+// PhasedStart is a no-op and returns the same error (if any) that Start
+// returned. If PhasedStart is called first, Start is a no-op and always
+// returns a nil error; the caller is responsible for using the PhasedStarter
+// to complete startup.
+func (d *Dispatcher) PhasedStart() (*PhasedStarter, error) {
+	starter := &PhasedStarter{
+		dispatcher: d,
+		log:        d.log,
+	}
+	if err := d.once.Start(func() error {
+		starter.log.Info("beginning phased dispatcher start")
+		starter.setRouters()
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return starter, nil
+}
+
+// Stop stops the Dispatcher, shutting down all inbounds, outbounds, and
+// transports. This function returns after everything has been stopped.
 //
-// This function returns after everything has been stopped.
+// Stop and PhasedStop are mutually exclusive. See the PhasedStop
+// documentation for details.
 func (d *Dispatcher) Stop() error {
-	// NOTE: These MUST be stopped in the order inbounds, outbounds, and then
-	// transports.
-	//
-	// If the outbounds are stopped before the inbounds, we might receive a
-	// request which needs to use a stopped outbound from a still-going
-	// inbound.
-	//
-	// If the transports are stopped before the outbounds, the peers contained
-	// in the outbound might be deleted from the transport's perspective and
-	// cause issues.
-	var allErrs []error
-	d.log.Info("Starting shutdown.")
+	stopper := &PhasedStopper{
+		dispatcher: d,
+		log:        d.log,
+	}
+	return d.once.Stop(func() error {
+		d.log.Info("shutting down dispatcher")
+		return multierr.Combine(
+			stopper.StopInbounds(),
+			stopper.StopOutbounds(),
+			stopper.StopTransports(),
+		)
+	})
+}
 
-	// Stop Inbounds
-	d.log.Debug("Stopping inbounds.")
-	wait := errorsync.ErrorWaiter{}
-	for _, i := range d.inbounds {
-		wait.Submit(i.Stop)
+// PhasedStop is a more granular alternative to Stop, and is intended only for
+// advanced users. Rather than stopping all inbounds, outbounds, and
+// transports at once, it lets the user stop them separately.
+//
+// Stop and PhasedStop are mutually exclusive. If Stop is called first,
+// PhasedStop is a no-op and returns the same error (if any) that Stop
+// returned. If PhasedStop is called first, Stop is a no-op and always returns
+// a nil error; the caller is responsible for using the PhasedStopper to
+// complete shutdown.
+func (d *Dispatcher) PhasedStop() (*PhasedStopper, error) {
+	if err := d.once.Stop(func() error { return nil }); err != nil {
+		return nil, err
 	}
-	if errs := wait.Wait(); len(errs) > 0 {
-		allErrs = append(allErrs, errs...)
-	}
-	d.log.Debug("Stopped inbounds.")
-
-	// Stop Outbounds
-	d.log.Debug("Stopping outbounds.")
-	wait = errorsync.ErrorWaiter{}
-	for _, o := range d.outbounds {
-		if o.Unary != nil {
-			wait.Submit(o.Unary.Stop)
-		}
-		if o.Oneway != nil {
-			wait.Submit(o.Oneway.Stop)
-		}
-	}
-	if errs := wait.Wait(); len(errs) > 0 {
-		allErrs = append(allErrs, errs...)
-	}
-	d.log.Debug("Stopped outbounds.")
-
-	// Stop Transports
-	d.log.Debug("Stopping transports.")
-	wait = errorsync.ErrorWaiter{}
-	for _, t := range d.transports {
-		wait.Submit(t.Stop)
-	}
-	if errs := wait.Wait(); len(errs) > 0 {
-		allErrs = append(allErrs, errs...)
-	}
-	d.log.Debug("Stopped transports.")
-
-	if err := multierr.Combine(allErrs...); err != nil {
-		return err
-	}
-
-	// Stop pushing metrics to Tally.
-	d.log.Debug("Stopping metrics push loop, if any.")
-	d.stopRegistryPush()
-	d.log.Debug("Stopped metrics push loop, if any.")
-
-	d.log.Info("Completed shutdown.")
-	return nil
+	return &PhasedStopper{
+		dispatcher: d,
+		log:        d.log,
+	}, nil
 }
 
 // Router returns the procedure router.

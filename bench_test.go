@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -333,4 +333,19 @@ func Benchmark_TChannel_TChannelToTChannel(b *testing.B) {
 
 	b.ResetTimer()
 	runTChannelClient(b, clientCh, serverCh.PeerInfo().HostPort)
+}
+
+func BenchmarkHTTPRoundTripper(b *testing.B) {
+	uri := "http://localhost:8001"
+
+	outbound := yhttp.NewTransport().NewSingleOutbound(uri)
+	require.NoError(b, outbound.Start())
+	defer outbound.Stop()
+
+	roundTripper := &http.Client{Transport: outbound}
+
+	withHTTPServer(b, ":8001", httpEcho(b), func() {
+		b.ResetTimer()
+		runHTTPClient(b, roundTripper, uri)
+	})
 }

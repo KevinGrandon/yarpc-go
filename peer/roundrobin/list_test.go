@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -40,8 +40,8 @@ var (
 	_noContextDeadlineError = yarpcerrors.Newf(yarpcerrors.CodeInvalidArgument, "can't wait for peer without a context deadline for a roundrobin peer list")
 )
 
-func newNotRunningError(err error) error {
-	return yarpcerrors.FailedPreconditionErrorf("roundrobin peer list is not running: %s", err.Error())
+func newNotRunningError(err string) error {
+	return yarpcerrors.FailedPreconditionErrorf("roundrobin peer list is not running: %s", err)
 }
 
 func newUnavailableError(err error) error {
@@ -83,6 +83,9 @@ func TestRoundRobinList(t *testing.T) {
 
 		// Boolean indicating whether the PeerList is "running" after the actions have been applied
 		expectedRunning bool
+
+		// Boolean indicating whether peers should be shuffled
+		shuffle bool
 	}
 	tests := []testStruct{
 		{
@@ -130,7 +133,7 @@ func TestRoundRobinList(t *testing.T) {
 				UpdateAction{AddedPeerIDs: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}},
 				StopAction{},
 				ChooseAction{
-					ExpectedErr:         newNotRunningError(context.DeadlineExceeded),
+					ExpectedErr:         newNotRunningError("could not wait for instance to start running: current state is \"stopped\""),
 					InputContextTimeout: 10 * time.Millisecond,
 				},
 			},
@@ -266,11 +269,11 @@ func TestRoundRobinList(t *testing.T) {
 			msg: "choose before start",
 			peerListActions: []PeerListAction{
 				ChooseAction{
-					ExpectedErr:         newNotRunningError(context.DeadlineExceeded),
+					ExpectedErr:         newNotRunningError("context finished while waiting for instance to start: context deadline exceeded"),
 					InputContextTimeout: 10 * time.Millisecond,
 				},
 				ChooseAction{
-					ExpectedErr:         newNotRunningError(context.DeadlineExceeded),
+					ExpectedErr:         newNotRunningError("context finished while waiting for instance to start: context deadline exceeded"),
 					InputContextTimeout: 10 * time.Millisecond,
 				},
 			},
@@ -345,6 +348,29 @@ func TestRoundRobinList(t *testing.T) {
 				ChooseAction{ExpectedPeer: "1"},
 			},
 			expectedRunning: true,
+		},
+		{
+			msg: "start add many and remove many with shuffle",
+			retainedAvailablePeerIDs: []string{"1", "2", "3-r", "4-r", "5-a-r", "6-a-r", "7-a", "8-a"},
+			releasedPeerIDs:          []string{"3-r", "4-r", "5-a-r", "6-a-r"},
+			expectedAvailablePeers:   []string{"1", "2", "7-a", "8-a"},
+			peerListActions: []PeerListAction{
+				StartAction{},
+				UpdateAction{AddedPeerIDs: []string{"1", "2", "3-r", "4-r"}},
+				UpdateAction{
+					AddedPeerIDs: []string{"5-a-r", "6-a-r", "7-a", "8-a"},
+				},
+				UpdateAction{
+					RemovedPeerIDs: []string{"5-a-r", "6-a-r", "3-r", "4-r"},
+				},
+				ChooseAction{ExpectedPeer: "2"},
+				ChooseAction{ExpectedPeer: "1"},
+				ChooseAction{ExpectedPeer: "8-a"},
+				ChooseAction{ExpectedPeer: "7-a"},
+				ChooseAction{ExpectedPeer: "2"},
+			},
+			expectedRunning: true,
+			shuffle:         true,
 		},
 		{
 			msg: "add retain error",
@@ -862,7 +888,10 @@ func TestRoundRobinList(t *testing.T) {
 			ExpectPeerRetainsWithError(transport, tt.errRetainedPeerIDs, tt.retainErr)
 			ExpectPeerReleases(transport, tt.errReleasedPeerIDs, tt.releaseErr)
 
-			var opts []ListOption
+			opts := []ListOption{seed(0)}
+			if !tt.shuffle {
+				opts = append(opts, noShuffle)
+			}
 			pl := New(transport, opts...)
 
 			deps := ListActionDeps{
@@ -970,3 +999,13 @@ func (p *testPeer) Status() peer.Status {
 func (*testPeer) StartRequest() {}
 
 func (*testPeer) EndRequest() {}
+
+var noShuffle ListOption = func(c *listConfig) {
+	c.shuffle = false
+}
+
+func seed(seed int64) ListOption {
+	return func(c *listConfig) {
+		c.seed = seed
+	}
+}

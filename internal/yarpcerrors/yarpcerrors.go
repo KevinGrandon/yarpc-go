@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,11 @@
 
 package yarpcerrors
 
-import "go.uber.org/yarpc/yarpcerrors"
+import (
+	"fmt"
+
+	"go.uber.org/yarpc/yarpcerrors"
+)
 
 // NewWithNamef calls yarpcerrors.Newf and WithName on the resulting Status.
 //
@@ -30,4 +34,10 @@ import "go.uber.org/yarpc/yarpcerrors"
 // backwards compatibility.
 func NewWithNamef(code yarpcerrors.Code, name string, format string, args ...interface{}) *yarpcerrors.Status {
 	return yarpcerrors.Newf(code, format, args...).WithName(name)
+}
+
+// AnnotateWithInfo will take an error and add info to it's error message while
+// keeping the same status code.
+func AnnotateWithInfo(status *yarpcerrors.Status, format string, args ...interface{}) *yarpcerrors.Status {
+	return yarpcerrors.Newf(status.Code(), "%s: %s", fmt.Sprintf(format, args...), status.Message())
 }

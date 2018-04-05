@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@ package tchannel
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -35,6 +36,13 @@ import (
 	"go.uber.org/zap"
 )
 
+type headerCase int
+
+const (
+	canonicalizedHeaderCase headerCase = iota
+	originalHeaderCase
+)
+
 // Transport is a TChannel transport suitable for use with YARPC's peer
 // selection system.
 // The transport implements peer.Transport so multiple peer.List
@@ -45,18 +53,20 @@ type Transport struct {
 	lock sync.Mutex
 	once *lifecycle.Once
 
-	ch     Channel
-	router transport.Router
-	tracer opentracing.Tracer
-	logger *zap.Logger
-	name   string
-	addr   string
+	ch       *tchannel.Channel
+	router   transport.Router
+	tracer   opentracing.Tracer
+	logger   *zap.Logger
+	name     string
+	addr     string
+	listener net.Listener
 
 	connTimeout            time.Duration
 	initialConnRetryDelay  time.Duration
 	connRetryBackoffFactor int
 	connectorsGroup        sync.WaitGroup
 	connBackoffStrategy    backoffapi.Strategy
+	headerCase             headerCase
 
 	peers map[string]*tchannelPeer
 }
@@ -87,15 +97,21 @@ func (o transportOptions) newTransport() *Transport {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	headerCase := canonicalizedHeaderCase
+	if o.originalHeaders {
+		headerCase = originalHeaderCase
+	}
 	return &Transport{
 		once:                lifecycle.NewOnce(),
 		name:                o.name,
 		addr:                o.addr,
+		listener:            o.listener,
 		connTimeout:         o.connTimeout,
 		connBackoffStrategy: o.connBackoffStrategy,
 		peers:               make(map[string]*tchannelPeer),
 		tracer:              o.tracer,
 		logger:              logger,
+		headerCase:          headerCase,
 	}
 }
 
@@ -190,8 +206,9 @@ func (t *Transport) start() error {
 	chopts := tchannel.ChannelOptions{
 		Tracer: t.tracer,
 		Handler: handler{
-			router: t.router,
-			tracer: t.tracer,
+			router:     t.router,
+			tracer:     t.tracer,
+			headerCase: t.headerCase,
 		},
 		OnPeerStatusChanged: t.onPeerStatusChanged,
 	}
@@ -201,23 +218,28 @@ func (t *Transport) start() error {
 	}
 	t.ch = ch
 
-	// Default to ListenIP if addr wasn't given.
-	addr := t.addr
-	if addr == "" {
-		listenIP, err := tchannel.ListenIP()
-		if err != nil {
+	if t.listener != nil {
+		if err := t.ch.Serve(t.listener); err != nil {
 			return err
 		}
+	} else {
+		// Default to ListenIP if addr wasn't given.
+		addr := t.addr
+		if addr == "" {
+			listenIP, err := tchannel.ListenIP()
+			if err != nil {
+				return err
+			}
 
-		addr = listenIP.String() + ":0"
-		// TODO(abg): Find a way to export this to users
-	}
+			addr = listenIP.String() + ":0"
+			// TODO(abg): Find a way to export this to users
+		}
 
-	// TODO(abg): If addr was just the port (":4040"), we want to use
-	// ListenIP() + ":4040" rather than just ":4040".
-
-	if err := t.ch.ListenAndServe(addr); err != nil {
-		return err
+		// TODO(abg): If addr was just the port (":4040"), we want to use
+		// ListenIP() + ":4040" rather than just ":4040".
+		if err := t.ch.ListenAndServe(addr); err != nil {
+			return err
+		}
 	}
 
 	t.addr = t.ch.PeerInfo().HostPort

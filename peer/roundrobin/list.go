@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,16 +21,22 @@
 package roundrobin
 
 import (
+	"time"
+
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/peer/peerlist"
 )
 
 type listConfig struct {
 	capacity int
+	shuffle  bool
+	seed     int64
 }
 
 var defaultListConfig = listConfig{
 	capacity: 10,
+	shuffle:  true,
+	seed:     time.Now().UnixNano(),
 }
 
 // ListOption customizes the behavior of a roundrobin list.
@@ -53,12 +59,20 @@ func New(transport peer.Transport, opts ...ListOption) *List {
 		o(&cfg)
 	}
 
+	plOpts := []peerlist.ListOption{
+		peerlist.Capacity(cfg.capacity),
+		peerlist.Seed(cfg.seed),
+	}
+	if !cfg.shuffle {
+		plOpts = append(plOpts, peerlist.NoShuffle())
+	}
+
 	return &List{
 		List: peerlist.New(
 			"roundrobin",
 			transport,
 			newPeerRing(),
-			peerlist.Capacity(cfg.capacity),
+			plOpts...,
 		),
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2018 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,7 @@ import (
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/internal/introspection"
+	intyarpcerrors "go.uber.org/yarpc/internal/yarpcerrors"
 	peerchooser "go.uber.org/yarpc/peer"
 	"go.uber.org/yarpc/peer/hostport"
 	"go.uber.org/yarpc/pkg/errors"
@@ -74,25 +75,33 @@ func (o *Outbound) Chooser() peer.Chooser {
 
 // Call sends an RPC over this TChannel outbound.
 func (o *Outbound) Call(ctx context.Context, req *transport.Request) (*transport.Response, error) {
-	if err := o.transport.once.WaitUntilRunning(ctx); err != nil {
-		return nil, err
+	if req == nil {
+		return nil, yarpcerrors.InvalidArgumentErrorf("request for tchannel outbound was nil")
+	}
+	if err := o.once.WaitUntilRunning(ctx); err != nil {
+		return nil, intyarpcerrors.AnnotateWithInfo(yarpcerrors.FromError(err), "error waiting for tchannel outbound to start for service: %s", req.Service)
 	}
 	if _, ok := ctx.(tchannel.ContextWithHeaders); ok {
 		return nil, errDoNotUseContextWithHeaders
 	}
-	root := o.transport.ch.RootPeers()
 	p, onFinish, err := o.getPeerForRequest(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, toYARPCError(req, err)
 	}
-	tp := root.GetOrAdd(p.HostPort())
-	res, err := o.callWithPeer(ctx, req, tp)
+	res, err := p.Call(ctx, req)
 	onFinish(err)
-	return res, err
+	return res, toYARPCError(req, err)
+}
+
+// Call sends an RPC to this specific peer.
+func (p *tchannelPeer) Call(ctx context.Context, req *transport.Request) (*transport.Response, error) {
+	root := p.transport.ch.RootPeers()
+	tp := root.GetOrAdd(p.HostPort())
+	return callWithPeer(ctx, req, tp, p.transport.headerCase)
 }
 
 // callWithPeer sends a request with the chosen peer.
-func (o *Outbound) callWithPeer(ctx context.Context, req *transport.Request, peer *tchannel.Peer) (*transport.Response, error) {
+func callWithPeer(ctx context.Context, req *transport.Request, peer *tchannel.Peer, headerCase headerCase) (*transport.Response, error) {
 	// NB(abg): Under the current API, the local service's name is required
 	// twice: once when constructing the TChannel and then again when
 	// constructing the RPC.
@@ -123,11 +132,11 @@ func (o *Outbound) callWithPeer(ctx context.Context, req *transport.Request, pee
 	if err != nil {
 		return nil, err
 	}
+	reqHeaders := headerMap(req.Headers, headerCase)
 
-	// Inject tracing system baggage
-	reqHeaders := tchannel.InjectOutboundSpan(call.Response(), req.Headers.Items())
-
-	if err := writeRequestHeaders(ctx, format, reqHeaders, call.Arg2Writer); err != nil {
+	// baggage headers are transport implementation details that are stripped out (and stored in the context). Users don't interact with it
+	tracingBaggage := tchannel.InjectOutboundSpan(call.Response(), nil)
+	if err := writeHeaders(format, reqHeaders, tracingBaggage, call.Arg2Writer); err != nil {
 		// TODO(abg): This will wrap IO errors while writing headers as encode
 		// errors. We should fix that.
 		return nil, errors.RequestHeadersEncodeError(req, err)

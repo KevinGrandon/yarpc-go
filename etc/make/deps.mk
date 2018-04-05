@@ -10,7 +10,7 @@ GEN_GO_BIN_DEPS = \
 # List of vendored go executables needed for other operations
 EXTRA_GO_BIN_DEPS = \
 	github.com/kisielk/errcheck \
-	github.com/golang/lint/golint \
+	golang.org/x/lint/golint \
 	github.com/wadey/gocovmerge \
 	golang.org/x/tools/cmd/cover \
 	go.uber.org/tools/parallel-exec \
@@ -20,7 +20,7 @@ EXTRA_GO_BIN_DEPS = \
 # but have to pin to 0.12.3 due to https://github.com/Masterminds/glide/issues/745
 GLIDE_VERSION := 0.12.3
 THRIFT_VERSION := 1.0.0-dev
-PROTOC_VERSION := 3.4.0
+PROTOC_VERSION := 3.5.1
 RAGEL_VERSION := 6.10
 
 GLIDE_OS := $(UNAME_OS)
